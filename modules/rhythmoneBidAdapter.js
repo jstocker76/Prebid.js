@@ -11,6 +11,67 @@ function RhythmOneBidAdapter() {
     return true;
   };
 
+  this.getUserSyncs = function (syncOptions) {
+    let slots = [];
+    let placementIds = [];
+
+    for (let k in slotsToBids) {
+      slots.push(k);
+      placementIds.push(getFirstParam('placementId', [slotsToBids[k]]));
+    }
+
+    let data = {
+      doc_version: 1,
+      doc_type: 'Prebid Audit',
+      placement_id: placementIds.join(',').replace(/[,]+/g, ',').replace(/^,|,$/g, '')
+    };
+    let w = typeof (window) !== 'undefined' ? window : {document: {location: {href: ''}}};
+    let ao = w.document.location.ancestorOrigins;
+    let q = [];
+    let u = '//hbevents.1rx.io/audit?';
+
+    if (ao && ao.length > 0) {
+      data.ancestor_origins = ao[ao.length - 1];
+    }
+
+    data.popped = w.opener !== null ? 1 : 0;
+    data.framed = w.top === w ? 0 : 1;
+
+    try {
+      data.url = w.top.document.location.href.toString();
+    } catch (ex) {
+      data.url = w.document.location.href.toString();
+    }
+
+    try {
+      data.prebid_version = '$prebid.version$';
+      data.prebid_timeout = config.getConfig('bidderTimeout');
+    } catch (ex) { }
+
+    data.response_ms = Date.now() - loadStart;
+    data.placement_codes = slots.join(',');
+    data.bidder_version = version;
+
+    for (let k in data) {
+      q.push(encodeURIComponent(k) + '=' + encodeURIComponent((typeof data[k] === 'object' ? JSON.stringify(data[k]) : data[k])));
+    }
+
+    q.sort();
+
+    if (syncOptions.pixelEnabled) {
+      return [{
+        type: 'image',
+        url: u + q.join('&')
+      }];
+    } else {
+      if (typeof (Image) !== 'undefined') {
+        let i = new Image();
+        i.src = u + q.join('&');
+      }
+      return [];
+    }
+  };
+
   function getFirstParam(key, validBidRequests) {
     for (let i = 0; i < validBidRequests.length; i++) {
       if (validBidRequests[i].params && validBidRequests[i].params[key]) {
@@ -22,6 +83,7 @@ function RhythmOneBidAdapter() {
   let slotsToBids = {};
   let that = this;
   let version = '1.0.0.0';
+  let loadStart = Date.now();
 
   this.buildRequests = function (BRs) {
     let fallbackPlacementId = getFirstParam('placementId', BRs);
@@ -29,13 +91,14 @@ function RhythmOneBidAdapter() {
       return [];
     }
 
+    loadStart = Date.now();
     slotsToBids = {};
 
     let query = [];
     let w = (typeof window !== 'undefined' ? window : {});
 
-    function p(k, v) {
-      if (v instanceof Array) { v = v.join(','); }
+    function p(k, v, d) {
+      if (v instanceof Array) { v = v.join((d || ',')); }
       if (typeof v !== 'undefined') { query.push(encodeURIComponent(k) + '=' + encodeURIComponent(v)); }
     }
 
@@ -63,6 +126,53 @@ function RhythmOneBidAdapter() {
       }
       return l;
     }, ''));
+
+    function getMangoUrl() {
+      let url = '//' + (getFirstParam('host', BRs) || 'rthm.1rx.io') + '/ssp/hb?';
+
+      p('displayheight', (w.screen ? w.screen.height : ''));
+      p('displaywidth', (w.screen ? w.screen.width : ''));
+      p('referrer', attempt(function() {
+        return w.document.referrer; // try/catch is in the attempt function
+      }, ''));
+
+      let heights = [];
+      let rxres = [];
+      let widths = [];
+      let floors = [];
+      let placementids = [];
+      let slots = [];
+      let i = 0;
+      let j;
+
+      for (; i < BRs.length; i++) {
+        if (BRs[i].sizes.length > 0 && typeof BRs[i].sizes[0] === 'number') { BRs[i].sizes = [BRs[i].sizes]; }
+
+        let params = BRs[i].params || {};
+
+        slotsToBids[BRs[i].adUnitCode || BRs[i].placementCode] = BRs[i];
+
+        for (j = 0; j < BRs[i].sizes.length; j++) {
+          slots.push(encodeURIComponent(BRs[i].adUnitCode || BRs[i].placementCode).replace(/_/g, '%5F'));
+          heights.push(BRs[i].sizes[j][1] || '');
+          widths.push(BRs[i].sizes[j][0] || '');
+          rxres.push(params.rxres || '');
+          floors.push(params.floor || 0);
+          placementids.push(params.placementId || fallbackPlacementId);
+        }
+      }
+
+      p('slotids', slots, '_');
+      p('placementids', placementids, '_');
+      p('widths', widths, '_');
+      p('heights', heights, '_');
+      p('floors', floors, '_');
+      p('rxres', rxres, '_');
+
+      url += '&' + query.join('&') + '&';
+
+      return url;
+    }
 
     function getRMPUrl() {
       let url = getFirstParam('endpoint', BRs) || '//tag.1rx.io/rmp/{placementId}/0/{path}?z={zone}';
@@ -98,8 +208,7 @@ function RhythmOneBidAdapter() {
             if ((new w.ActiveXObject('ShockwaveFlash.ShockwaveFlash'))) {
               return 1;
             }
-          } catch (e) {
-          }
+          } catch (e) { }
         }
 
         return 0;
@@ -150,7 +259,7 @@ function RhythmOneBidAdapter() {
 
     return [{
       method: 'GET',
-      url: getRMPUrl()
+      url: getFirstParam('api', BRs) === 'mango' ? getMangoUrl() : getRMPUrl()
     }];
   };
 
@@ -171,7 +280,7 @@ function RhythmOneBidAdapter() {
 
     for (i = 0; i < responses.length; i++) {
       let bid = responses[i];
-      let bidRequest = slotsToBids[bid.impid];
+      let bidRequest = slotsToBids[decodeURIComponent(bid.impid)];
       let bidResponse = {
         requestId: bidRequest.bidId,
         bidderCode: that.code,
@@ -186,12 +295,14 @@ function RhythmOneBidAdapter() {
 
       if (bidRequest.mediaTypes && bidRequest.mediaTypes.video) {
         bidResponse.vastUrl = bid.nurl;
+        bidResponse.mediaType = 'video';
         bidResponse.ttl = 10000;
       } else {
         bidResponse.ad = bid.adm;
       }
       bids.push(bidResponse);
     }
+
     return bids;
   };
 }
